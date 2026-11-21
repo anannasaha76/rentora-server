@@ -274,6 +274,30 @@ app.put('/api/equipment/:id', async (req, res) => {
     return res.status(500).json({ message: 'Failed to update equipment.' });
   }
 });
+// Delete equipment by ID
+app.delete('/api/equipment/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid equipment ID format.' });
+    }
+
+
+    const result = await database.collection('equipment').deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Equipment not found.' });
+    }
+
+
+    return res.status(200).json({
+      message: 'Equipment deleted successfully.',
+      id,
+    });
+  } catch (err) {
+    console.error('Failed to delete equipment:', err);
+    return res.status(500).json({ message: 'Failed to delete equipment.' });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
