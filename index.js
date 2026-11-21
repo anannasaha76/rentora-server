@@ -734,6 +734,208 @@ app.put('/api/users/profile/:email', async (req, res) => {
     return res.status(500).json({ message: 'Failed to update user profile.' });
   }
 });
+/* =========================================================================
+   FAVORITES ROUTES
+   ========================================================================= */
+
+
+// Get all favorites for a customer by email
+app.get('/api/favorites/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'User email is required.' });
+    }
+
+
+    const favorites = await database
+      .collection('favorites')
+      .find({
+        $or: [
+          { userEmail: email },
+          { userEmail: email.toLowerCase() },
+          { userId: email },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+
+    return res.status(200).json(favorites);
+  } catch (err) {
+    console.error('Failed to fetch favorites:', err);
+    return res.status(500).json({ message: 'Failed to fetch favorites.' });
+  }
+});
+
+
+// Check if specific equipment is in customer's favorites
+app.get('/api/favorites/check/:email/:equipmentId', async (req, res) => {
+  try {
+    const { email, equipmentId } = req.params;
+    if (!email || !equipmentId) {
+      return res.status(400).json({ message: 'Email and equipmentId are required.' });
+    }
+
+
+    const favorite = await database.collection('favorites').findOne({
+      $or: [
+        { userEmail: email },
+        { userEmail: email.toLowerCase() },
+        { userId: email },
+      ],
+      equipmentId: String(equipmentId),
+    });
+
+
+    return res.status(200).json({
+      isFavorite: Boolean(favorite),
+      favoriteId: favorite ? favorite._id.toString() : null,
+    });
+  } catch (err) {
+    console.error('Failed to check favorite status:', err);
+    return res.status(500).json({ message: 'Failed to check favorite status.' });
+  }
+});
+
+
+// Add equipment to favorites
+app.post('/api/favorites', async (req, res) => {
+  try {
+    const {
+      userEmail,
+      userId,
+      equipmentId,
+      equipmentName,
+      category,
+      rentalPrice,
+      rentalType,
+      location,
+      availableQuantity,
+      image,
+      brand,
+      model,
+      description,
+      ownerName,
+      ownerEmail,
+    } = req.body || {};
+
+
+    if (!userEmail || !equipmentId) {
+      return res.status(400).json({ message: 'User email and equipmentId are required.' });
+    }
+
+
+    // Check if already favorited
+    const existing = await database.collection('favorites').findOne({
+      $or: [
+        { userEmail: userEmail },
+        { userEmail: userEmail.toLowerCase() },
+        { userId: userId || userEmail },
+      ],
+      equipmentId: String(equipmentId),
+    });
+
+
+    if (existing) {
+      return res.status(200).json({
+        message: 'Equipment is already in your favorites.',
+        favorite: existing,
+      });
+    }
+
+
+    const newFavorite = {
+      userEmail: String(userEmail),
+      userId: String(userId || ''),
+      equipmentId: String(equipmentId),
+      equipmentName: String(equipmentName || 'Equipment'),
+      category: String(category || 'General'),
+      rentalPrice: Number(rentalPrice || 0),
+      rentalType: String(rentalType || 'Daily'),
+      location: String(location || ''),
+      availableQuantity: Number(availableQuantity || 1),
+      image: String(image || ''),
+      brand: String(brand || ''),
+      model: String(model || ''),
+      description: String(description || ''),
+      ownerName: String(ownerName || ''),
+      ownerEmail: String(ownerEmail || ''),
+      createdAt: new Date(),
+    };
+
+
+    const insertResult = await database.collection('favorites').insertOne(newFavorite);
+    return res.status(201).json({
+      message: 'Equipment added to favorites.',
+      id: insertResult.insertedId.toString(),
+      favorite: { ...newFavorite, _id: insertResult.insertedId.toString() },
+    });
+  } catch (err) {
+    console.error('Failed to add favorite:', err);
+    return res.status(500).json({ message: 'Failed to add favorite.' });
+  }
+});
+
+
+// Remove favorite by favorite ID
+app.delete('/api/favorites/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid favorite ID format.' });
+    }
+
+
+    const result = await database.collection('favorites').deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Favorite item not found.' });
+    }
+
+
+    return res.status(200).json({
+      message: 'Favorite removed successfully.',
+      id,
+    });
+  } catch (err) {
+    console.error('Failed to remove favorite:', err);
+    return res.status(500).json({ message: 'Failed to remove favorite.' });
+  }
+});
+
+
+// Remove favorite by email & equipmentId
+app.delete('/api/favorites/item/:email/:equipmentId', async (req, res) => {
+  try {
+    const { email, equipmentId } = req.params;
+    if (!email || !equipmentId) {
+      return res.status(400).json({ message: 'Email and equipmentId are required.' });
+    }
+
+
+    const result = await database.collection('favorites').deleteOne({
+      $or: [
+        { userEmail: email },
+        { userEmail: email.toLowerCase() },
+        { userId: email },
+      ],
+      equipmentId: String(equipmentId),
+    });
+
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Favorite item not found.' });
+    }
+
+
+    return res.status(200).json({
+      message: 'Favorite removed successfully.',
+    });
+  } catch (err) {
+    console.error('Failed to remove favorite:', err);
+    return res.status(500).json({ message: 'Failed to remove favorite.' });
+  }
+});
 
 
 app.listen(port, () => {
