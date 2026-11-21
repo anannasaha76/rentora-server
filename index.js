@@ -172,6 +172,27 @@ app.get('/api/equipment/owner', async (req, res) => {
   }
 });
 
+// Get single equipment by ID
+app.get('/api/equipment/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid equipment ID format.' });
+    }
+
+
+    const item = await database.collection('equipment').findOne({ _id: new ObjectId(id) });
+    if (!item) {
+      return res.status(404).json({ message: 'Equipment not found.' });
+    }
+
+
+    return res.status(200).json(item);
+  } catch (err) {
+    console.error('Failed to fetch equipment by ID:', err);
+    return res.status(500).json({ message: 'Failed to fetch equipment.' });
+}
+});
 
 
 
