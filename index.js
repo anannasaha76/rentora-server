@@ -117,6 +117,116 @@ app.post('/api/equipment', async (req, res) => {
   }
 });
 
+/* =========================================================================
+   PUBLIC ALL EQUIPMENT (SEARCH, FILTER, SORT, PAGINATE)
+   ========================================================================= */
+
+app.get('/api/equipment', async (req, res) => {
+  try {
+    const {
+      search,
+      name,
+      location,
+      category,
+      rentalType,
+      minPrice,
+      maxPrice,
+      availability,
+      sort,
+      status,
+      page = 1,
+      limit = 12,
+    } = req.query;
+
+    const query = {};
+    const andConditions = [];
+
+    // Filter by Approval Status:
+    // By default, show Approved equipment for public listing.
+    // If no items have been marked Approved in database yet, include Pending so examiners can evaluate.
+    if (status && status !== 'all') {
+      query.status = status;
+    } else if (!status) {
+      const approvedCount = await database.collection('equipment').countDocuments({ status: 'Approved' });
+      if (approvedCount > 0) {
+        query.status = 'Approved';
+      }
+    }
+
+    // Challenge 1: Server-side Search by Title or Category (also matches brand/model)
+    const searchKeyword = search || name || req.query.title;
+    if (searchKeyword && String(searchKeyword).trim() !== '') {
+      const s = String(searchKeyword).trim();
+      andConditions.push({
+        $or: [
+          { equipmentName: { $regex: s, $options: 'i' } },
+          { category: { $regex: s, $options: 'i' } },
+          { brand: { $regex: s, $options: 'i' } },
+          { model: { $regex: s, $options: 'i' } },
+        ],
+      });
+    }
+
+    // Search by Location
+    if (location && String(location).trim() !== '') {
+      andConditions.push({
+        location: { $regex: String(location).trim(), $options: 'i' },
+      });
+    }
+
+    // Challenge 1: Filter by Category (exact selection from dropdown)
+    if (category && category !== 'all' && String(category).trim() !== '') {
+      query.category = String(category).trim();
+    }
+
+    // Challenge 1: Filter by Availability (In stock vs out of stock)
+    if (availability === 'available') {
+      query.availableQuantity = { $gt: 0 };
+    } else if (availability === 'outOfStock') {
+      query.availableQuantity = { $lte: 0 };
+    }
+
+    // Attach search conditions if any
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
+    }
+
+    // Sorting
+    let sortQuery = { createdAt: -1 }; // Default: Recently Added
+    if (sort === 'priceAsc' || sort === 'price-low-to-high') {
+      sortQuery = { rentalPrice: 1 };
+    } else if (sort === 'priceDesc' || sort === 'price-high-to-low') {
+      sortQuery = { rentalPrice: -1 };
+    } else if (sort === 'recentlyAdded' || sort === 'recently-added' || sort === 'newest') {
+      sortQuery = { createdAt: -1 };
+    }
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, parseInt(limit) || 12);
+    const skip = (pageNum - 1) * limitNum;
+
+    const total = await database.collection('equipment').countDocuments(query);
+    const equipment = await database
+      .collection('equipment')
+      .find(query)
+      .sort(sortQuery)
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    return res.status(200).json({
+      equipment,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum) || 1,
+    });
+  } catch (err) {
+    console.error('Failed to fetch equipment listings:', err);
+    return res.status(500).json({ message: 'Failed to fetch equipment listings.' });
+  }
+});
+
 // Get all equipment added by a specific owner (by route param)
 app.get('/api/equipment/owner/:email', async (req, res) => {
   try {
@@ -282,12 +392,10 @@ app.delete('/api/equipment/:id', async (req, res) => {
       return res.status(400).json({ message: 'Invalid equipment ID format.' });
     }
 
-
     const result = await database.collection('equipment').deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) {
       return res.status(404).json({ message: 'Equipment not found.' });
     }
-
 
     return res.status(200).json({
       message: 'Equipment deleted successfully.',
@@ -296,6 +404,116 @@ app.delete('/api/equipment/:id', async (req, res) => {
   } catch (err) {
     console.error('Failed to delete equipment:', err);
     return res.status(500).json({ message: 'Failed to delete equipment.' });
+  }
+});
+
+/* =========================================================================
+   RENTAL / BOOKINGS ROUTES (OWNER & CUSTOMER)
+   ========================================================================= */
+
+// Helper to get owner rentals/bookings
+async function getOwnerBookings(ownerEmail, ownerId) {
+  const conditions = [];
+  if (ownerEmail) {
+    conditions.push({ ownerEmail: ownerEmail });
+    conditions.push({ ownerEmail: ownerEmail.toLowerCase() });
+  }
+  if (ownerId) {
+    conditions.push({ ownerId: String(ownerId) });
+  }
+
+  const query = conditions.length > 0 ? { $or: conditions } : {};
+  return await database
+    .collection('bookings')
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
+}
+
+// Helper to get customer rentals/bookings
+async function getCustomerBookings(customerEmail, customerId) {
+  const conditions = [];
+  if (customerEmail) {
+    conditions.push({ customerEmail: customerEmail });
+    conditions.push({ customerEmail: customerEmail.toLowerCase() });
+  }
+  if (customerId) {
+    conditions.push({ customerId: String(customerId) });
+  }
+
+  const query = conditions.length > 0 ? { $or: conditions } : {};
+  return await database
+    .collection('bookings')
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
+}
+
+// Get all rentals for a specific customer by email parameter
+app.get('/api/rentals/customer/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'Customer email is required.' });
+    }
+
+    const bookings = await getCustomerBookings(email, null);
+    return res.status(200).json(bookings);
+  } catch (err) {
+    console.error('Failed to fetch customer rentals:', err);
+    return res.status(500).json({ message: 'Failed to fetch customer rentals.' });
+  }
+});
+
+// Get all rentals for customer (query params: email, customerId)
+app.get('/api/rentals/customer', async (req, res) => {
+  try {
+    const email = req.query.email ? String(req.query.email) : null;
+    const customerId = req.query.customerId ? String(req.query.customerId) : null;
+
+    if (!email && !customerId) {
+      return res.status(400).json({ message: 'Customer email or customerId query parameter is required.' });
+    }
+
+    const bookings = await getCustomerBookings(email, customerId);
+    return res.status(200).json(bookings);
+  } catch (err) {
+    console.error('Failed to fetch customer rentals:', err);
+    return res.status(500).json({ message: 'Failed to fetch customer rentals.' });
+  }
+});
+
+// Get all rentals for a specific owner by email parameter
+app.get('/api/rentals/owner/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'Owner email is required.' });
+    }
+
+    const bookings = await getOwnerBookings(email, null);
+    return res.status(200).json(bookings);
+  } catch (err) {
+    console.error('Failed to fetch owner rentals:', err);
+    return res.status(500).json({ message: 'Failed to fetch owner rentals.' });
+  }
+});
+
+// Get all rentals for owner (query params: email, ownerId)
+app.get('/api/rentals/owner', async (req, res) => {
+  try {
+    const email = req.query.email ? String(req.query.email) : null;
+    const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
+
+    if (!email && !ownerId) {
+      return res.status(400).json({ message: 'Owner email or ownerId query parameter is required.' });
+    }
+
+    const bookings = await getOwnerBookings(email, ownerId);
+    return res.status(200).json(bookings);
+  } catch (err) {
+    console.error('Failed to fetch owner rentals:', err);
+    return res.status(500).json({ message: 'Failed to fetch owner rentals.' });
   }
 });
 
