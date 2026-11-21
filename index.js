@@ -353,6 +353,13 @@ app.put('/api/equipment/:id', async (req, res) => {
     if (body.model !== undefined) updates.model = String(body.model).trim();
     if (body.image !== undefined) updates.image = String(body.image).trim();
     if (body.rentalTerms !== undefined) updates.rentalTerms = String(body.rentalTerms).trim();
+    if (body.status !== undefined) {
+      const validStatuses = ['Pending', 'Approved', 'Rejected'];
+      if (!validStatuses.includes(body.status)) {
+        return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+      }
+      updates.status = body.status;
+    }
 
 
     if (Object.keys(updates).length === 0) {
@@ -382,6 +389,43 @@ app.put('/api/equipment/:id', async (req, res) => {
   } catch (err) {
     console.error('Failed to update equipment:', err);
     return res.status(500).json({ message: 'Failed to update equipment.' });
+  }
+});
+
+// Update equipment status (Approve / Reject / Pending) - Admin action
+app.patch('/api/equipment/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid equipment ID format.' });
+    }
+
+    const validStatuses = ['Pending', 'Approved', 'Rejected'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
+      });
+    }
+
+    const result = await database.collection('equipment').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: 'after' }
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: 'Equipment not found.' });
+    }
+
+    return res.status(200).json({
+      message: `Equipment status updated to ${status}.`,
+      equipment: result,
+    });
+  } catch (err) {
+    console.error('Failed to update equipment status:', err);
+    return res.status(500).json({ message: 'Failed to update equipment status.' });
   }
 });
 // Delete equipment by ID
@@ -517,23 +561,40 @@ app.get('/api/rentals/owner', async (req, res) => {
   }
 });
 
+// Get single rental booking by ID (used for checkout / payment page)
+app.get('/api/rentals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid rental booking ID.' });
+    }
+
+    const booking = await database.collection('bookings').findOne({ _id: new ObjectId(id) });
+    if (!booking) {
+      return res.status(404).json({ message: 'Rental booking not found.' });
+    }
+
+    return res.status(200).json(booking);
+  } catch (err) {
+    console.error('Failed to fetch rental booking by ID:', err);
+    return res.status(500).json({ message: 'Failed to fetch rental booking.' });
+  }
+});
+
 // Update rental booking status (e.g. Pending -> Confirmed -> In Progress -> Completed -> Cancelled)
 app.patch('/api/rentals/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { bookingStatus, paymentStatus } = req.body || {};
 
-
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid rental booking ID.' });
     }
-
 
     const updates = {};
     if (bookingStatus) updates.bookingStatus = String(bookingStatus);
     if (paymentStatus) updates.paymentStatus = String(paymentStatus);
     updates.updatedAt = new Date();
-
 
     const result = await database.collection('bookings').findOneAndUpdate(
       { _id: new ObjectId(id) },
@@ -541,11 +602,9 @@ app.patch('/api/rentals/:id/status', async (req, res) => {
       { returnDocument: 'after' }
     );
 
-
     if (!result) {
       return res.status(404).json({ message: 'Rental booking not found.' });
     }
-
 
     return res.status(200).json({
       message: 'Rental status updated successfully.',
@@ -557,12 +616,10 @@ app.patch('/api/rentals/:id/status', async (req, res) => {
   }
 });
 
-
 // Create a new rental booking (used by checkout / booking modal)
 app.post('/api/rentals', async (req, res) => {
   try {
     const body = req.body || {};
-
 
     const requiredFields = [
       'customerEmail',
@@ -573,7 +630,6 @@ app.post('/api/rentals', async (req, res) => {
       'totalAmount',
     ];
 
-
     const missing = requiredFields.filter((f) => !body[f]);
     if (missing.length > 0) {
       return res.status(400).json({
@@ -581,6 +637,29 @@ app.post('/api/rentals', async (req, res) => {
       });
     }
 
+    const reqQty = Number(body.requiredQuantity || body.quantity || 1);
+    if (reqQty <= 0) {
+      return res.status(400).json({ message: 'Required quantity must be greater than zero.' });
+    }
+
+    // Check equipment availability in database
+    if (ObjectId.isValid(body.equipmentId)) {
+      const equip = await database.collection('equipment').findOne({ _id: new ObjectId(body.equipmentId) });
+      if (!equip) {
+        return res.status(404).json({ message: 'Equipment item not found.' });
+      }
+      if (equip.status && equip.status !== 'Approved') {
+        return res.status(400).json({ message: 'This equipment is currently not approved for rental.' });
+      }
+      if (equip.availableQuantity !== undefined && equip.availableQuantity < reqQty) {
+        return res.status(400).json({
+          message: `Requested quantity (${reqQty}) exceeds currently available stock (${equip.availableQuantity}).`,
+        });
+      }
+    }
+
+    const paymentStatus = String(body.paymentStatus || 'Pending');
+    const bookingStatus = String(body.bookingStatus || 'Pending');
 
     const newBooking = {
       // Customer Info
@@ -591,7 +670,6 @@ app.post('/api/rentals', async (req, res) => {
       deliveryAddress: String(body.deliveryAddress || 'N/A'),
       additionalNotes: String(body.additionalNotes || ''),
 
-
       // Equipment Info
       equipmentId: String(body.equipmentId),
       equipmentName: String(body.equipmentName),
@@ -599,31 +677,40 @@ app.post('/api/rentals', async (req, res) => {
       equipmentCategory: String(body.equipmentCategory || body.category || 'General'),
       location: String(body.location || ''),
 
-
       // Owner Info
       ownerId: String(body.ownerId || ''),
       ownerName: String(body.ownerName || ''),
       ownerEmail: String(body.ownerEmail || ''),
 
-
       // Rental Duration & Quantities
       startDate: String(body.startDate),
       endDate: String(body.endDate),
       durationDays: Number(body.durationDays) || 1,
-      requiredQuantity: Number(body.requiredQuantity || body.quantity || 1),
-
+      requiredQuantity: reqQty,
 
       // Pricing & Statuses
       rentalPrice: Number(body.rentalPrice || 0),
       rentalType: String(body.rentalType || 'Daily'),
       totalAmount: Number(body.totalAmount || 0),
-      paymentStatus: String(body.paymentStatus || 'Paid'), // Default to Paid upon checkout
-      bookingStatus: String(body.bookingStatus || 'Confirmed'), // Default to Confirmed when paid
+      paymentStatus: paymentStatus,
+      bookingStatus: bookingStatus,
       createdAt: new Date(),
     };
 
-
     const insertResult = await database.collection('bookings').insertOne(newBooking);
+
+    // If booking was already marked Paid upfront, decrement quantity
+    if (paymentStatus === 'Paid' && ObjectId.isValid(body.equipmentId) && reqQty > 0) {
+      try {
+        await database.collection('equipment').updateOne(
+          { _id: new ObjectId(body.equipmentId), availableQuantity: { $gte: reqQty } },
+          { $inc: { availableQuantity: -reqQty } }
+        );
+      } catch (updateErr) {
+        console.warn('Could not decrement availableQuantity for equipment:', updateErr);
+      }
+    }
+
     return res.status(201).json({
       message: 'Rental booking created successfully.',
       id: insertResult.insertedId.toString(),
@@ -632,6 +719,229 @@ app.post('/api/rentals', async (req, res) => {
   } catch (err) {
     console.error('Failed to create rental booking:', err);
     return res.status(500).json({ message: 'Failed to create rental booking.' });
+  }
+});
+
+// POST /api/bookings — Section 7 of Stripe Payment Guide (Save to MongoDB after Stripe payment)
+app.post('/api/bookings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const {
+      equipmentId,
+      equipmentName,
+      customerEmail,
+      customerName,
+      quantity = 1,
+      totalAmount,
+      amount,
+      transactionId,
+      startDate,
+      endDate,
+      durationDays = 1,
+    } = body;
+
+    const txId = String(transactionId || `pi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
+    const finalAmount = parseFloat(totalAmount || amount || 0);
+    const qty = parseInt(quantity || 1, 10);
+
+    // Idempotency check: prevent duplicate bookings if success page reloaded
+    const existingBooking = await database.collection('bookings').findOne({ transactionId: txId });
+    if (existingBooking) {
+      return res.status(200).json({
+        success: true,
+        message: 'Booking already recorded for this transaction.',
+        booking: existingBooking,
+      });
+    }
+
+    // 1. Deduct available equipment quantity atomically
+    if (ObjectId.isValid(equipmentId) && qty > 0) {
+      try {
+        await database.collection('equipment').updateOne(
+          { _id: new ObjectId(equipmentId), availableQuantity: { $gte: qty } },
+          { $inc: { availableQuantity: -qty } }
+        );
+      } catch (qtyErr) {
+        console.warn('Could not decrement equipment quantity:', qtyErr);
+      }
+    }
+
+    // 2. Insert booking document
+    const newBooking = {
+      equipmentId: String(equipmentId || ''),
+      equipmentName: String(equipmentName || 'Equipment Item'),
+      equipmentImage: String(body.equipmentImage || ''),
+      equipmentCategory: String(body.category || body.equipmentCategory || 'General'),
+      location: String(body.location || ''),
+      ownerId: String(body.ownerId || ''),
+      ownerName: String(body.ownerName || ''),
+      ownerEmail: String(body.ownerEmail || ''),
+      customerId: String(body.customerId || ''),
+      customerName: String(customerName || 'Customer'),
+      customerEmail: String(customerEmail || ''),
+      customerPhone: String(body.customerPhone || 'N/A'),
+      deliveryAddress: String(body.deliveryAddress || 'N/A'),
+      additionalNotes: String(body.additionalNotes || ''),
+      startDate: String(startDate || new Date().toISOString().split('T')[0]),
+      endDate: String(endDate || new Date().toISOString().split('T')[0]),
+      durationDays: Number(durationDays || 1),
+      requiredQuantity: qty,
+      rentalPrice: Number(body.rentalPrice || 0),
+      rentalType: String(body.rentalType || 'Daily'),
+      totalAmount: finalAmount,
+      transactionId: txId,
+      paymentStatus: 'Paid',
+      bookingStatus: 'Confirmed',
+      paidAt: new Date(),
+      createdAt: new Date(),
+    };
+
+    const bookingResult = await database.collection('bookings').insertOne(newBooking);
+    const bookingId = bookingResult.insertedId.toString();
+
+    // 3. Log payment separately in payments collection
+    const paymentRecord = {
+      bookingId: bookingId,
+      transactionId: txId,
+      userEmail: customerEmail,
+      customerEmail: customerEmail,
+      customerName: customerName,
+      equipmentId: String(equipmentId || ''),
+      equipmentName: String(equipmentName || ''),
+      amount: finalAmount,
+      totalAmount: finalAmount,
+      paymentMethod: 'Stripe',
+      paymentStatus: 'Paid',
+      status: 'Completed',
+      paidAt: new Date(),
+      createdAt: new Date(),
+    };
+
+    await database.collection('payments').insertOne(paymentRecord);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Booking created and payment recorded successfully.',
+      booking: { ...newBooking, _id: bookingId },
+      payment: paymentRecord,
+    });
+  } catch (error) {
+    console.error('Failed to save booking from Stripe payment:', error);
+    return res.status(500).json({ message: error.message || 'Failed to save booking.' });
+  }
+});
+
+/* =========================================================================
+   PAYMENT ROUTES (Stripe & Gateway Integration)
+   ========================================================================= */
+
+// Process a payment for a booking
+app.post('/api/payments', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { bookingId, paymentMethod = 'Stripe' } = body;
+
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ message: 'A valid bookingId is required for payment processing.' });
+    }
+
+    const booking = await database.collection('bookings').findOne({ _id: new ObjectId(bookingId) });
+    if (!booking) {
+      return res.status(404).json({ message: 'Rental booking not found.' });
+    }
+
+    if (booking.paymentStatus === 'Paid') {
+      return res.status(400).json({ message: 'This booking has already been paid.' });
+    }
+
+    // Verify equipment availability before finalizing payment
+    if (ObjectId.isValid(booking.equipmentId)) {
+      const equip = await database.collection('equipment').findOne({ _id: new ObjectId(booking.equipmentId) });
+      if (equip && equip.availableQuantity !== undefined && equip.availableQuantity < booking.requiredQuantity) {
+        return res.status(400).json({
+          message: `Cannot complete payment: requested units (${booking.requiredQuantity}) exceed available units (${equip.availableQuantity}).`,
+        });
+      }
+    }
+
+    const transactionId =
+      body.transactionId ||
+      `ch_${Date.now()}_${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
+    const paymentRecord = {
+      bookingId: String(bookingId),
+      equipmentId: String(booking.equipmentId),
+      equipmentName: String(booking.equipmentName),
+      customerEmail: String(booking.customerEmail),
+      customerName: String(booking.customerName),
+      ownerEmail: String(booking.ownerEmail || ''),
+      totalAmount: Number(body.totalAmount || booking.totalAmount || 0),
+      paymentMethod: String(paymentMethod),
+      transactionId: transactionId,
+      status: 'Completed',
+      createdAt: new Date(),
+    };
+
+    // Save payment record in payments collection
+    const paymentResult = await database.collection('payments').insertOne(paymentRecord);
+
+    // Update booking to Paid & Confirmed
+    const updatedBooking = await database.collection('bookings').findOneAndUpdate(
+      { _id: new ObjectId(bookingId) },
+      {
+        $set: {
+          paymentStatus: 'Paid',
+          bookingStatus: 'Confirmed',
+          transactionId: transactionId,
+          updatedAt: new Date(),
+        },
+      },
+      { returnDocument: 'after' }
+    );
+
+    // Decrement availableQuantity in equipment collection
+    if (ObjectId.isValid(booking.equipmentId) && booking.requiredQuantity > 0) {
+      try {
+        await database.collection('equipment').updateOne(
+          { _id: new ObjectId(booking.equipmentId), availableQuantity: { $gte: booking.requiredQuantity } },
+          { $inc: { availableQuantity: -booking.requiredQuantity } }
+        );
+      } catch (equipErr) {
+        console.warn('Failed to decrement available quantity during payment:', equipErr);
+      }
+    }
+
+    return res.status(200).json({
+      message: 'Payment completed successfully and booking confirmed.',
+      payment: { ...paymentRecord, _id: paymentResult.insertedId.toString() },
+      booking: updatedBooking,
+    });
+  } catch (err) {
+    console.error('Failed to process payment:', err);
+    return res.status(500).json({ message: 'Failed to process payment.' });
+  }
+});
+
+// Get payment receipt / details by transactionId or bookingId
+app.get('/api/payments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let query;
+    if (ObjectId.isValid(id)) {
+      query = { $or: [{ _id: new ObjectId(id) }, { bookingId: id }, { transactionId: id }] };
+    } else {
+      query = { $or: [{ bookingId: id }, { transactionId: id }] };
+    }
+
+    const payment = await database.collection('payments').findOne(query);
+    if (!payment) {
+      return res.status(404).json({ message: 'Payment record not found.' });
+    }
+
+    return res.status(200).json(payment);
+  } catch (err) {
+    console.error('Failed to fetch payment details:', err);
+    return res.status(500).json({ message: 'Failed to fetch payment record.' });
   }
 });
 /* =========================================================================
