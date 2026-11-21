@@ -517,6 +517,125 @@ app.get('/api/rentals/owner', async (req, res) => {
   }
 });
 
+// Update rental booking status (e.g. Pending -> Confirmed -> In Progress -> Completed -> Cancelled)
+app.patch('/api/rentals/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { bookingStatus, paymentStatus } = req.body || {};
+
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid rental booking ID.' });
+    }
+
+
+    const updates = {};
+    if (bookingStatus) updates.bookingStatus = String(bookingStatus);
+    if (paymentStatus) updates.paymentStatus = String(paymentStatus);
+    updates.updatedAt = new Date();
+
+
+    const result = await database.collection('bookings').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updates },
+      { returnDocument: 'after' }
+    );
+
+
+    if (!result) {
+      return res.status(404).json({ message: 'Rental booking not found.' });
+    }
+
+
+    return res.status(200).json({
+      message: 'Rental status updated successfully.',
+      rental: result,
+    });
+  } catch (err) {
+    console.error('Failed to update rental status:', err);
+    return res.status(500).json({ message: 'Failed to update rental status.' });
+  }
+});
+
+
+// Create a new rental booking (used by checkout / booking modal)
+app.post('/api/rentals', async (req, res) => {
+  try {
+    const body = req.body || {};
+
+
+    const requiredFields = [
+      'customerEmail',
+      'equipmentId',
+      'equipmentName',
+      'startDate',
+      'endDate',
+      'totalAmount',
+    ];
+
+
+    const missing = requiredFields.filter((f) => !body[f]);
+    if (missing.length > 0) {
+      return res.status(400).json({
+        message: `Missing required booking fields: ${missing.join(', ')}`,
+      });
+    }
+
+
+    const newBooking = {
+      // Customer Info
+      customerId: String(body.customerId || ''),
+      customerName: String(body.customerName || 'Anonymous Customer'),
+      customerEmail: String(body.customerEmail || ''),
+      customerPhone: String(body.customerPhone || body.contactNumber || 'N/A'),
+      deliveryAddress: String(body.deliveryAddress || 'N/A'),
+      additionalNotes: String(body.additionalNotes || ''),
+
+
+      // Equipment Info
+      equipmentId: String(body.equipmentId),
+      equipmentName: String(body.equipmentName),
+      equipmentImage: String(body.equipmentImage || ''),
+      equipmentCategory: String(body.equipmentCategory || body.category || 'General'),
+      location: String(body.location || ''),
+
+
+      // Owner Info
+      ownerId: String(body.ownerId || ''),
+      ownerName: String(body.ownerName || ''),
+      ownerEmail: String(body.ownerEmail || ''),
+
+
+      // Rental Duration & Quantities
+      startDate: String(body.startDate),
+      endDate: String(body.endDate),
+      durationDays: Number(body.durationDays) || 1,
+      requiredQuantity: Number(body.requiredQuantity || body.quantity || 1),
+
+
+      // Pricing & Statuses
+      rentalPrice: Number(body.rentalPrice || 0),
+      rentalType: String(body.rentalType || 'Daily'),
+      totalAmount: Number(body.totalAmount || 0),
+      paymentStatus: String(body.paymentStatus || 'Paid'), // Default to Paid upon checkout
+      bookingStatus: String(body.bookingStatus || 'Confirmed'), // Default to Confirmed when paid
+      createdAt: new Date(),
+    };
+
+
+    const insertResult = await database.collection('bookings').insertOne(newBooking);
+    return res.status(201).json({
+      message: 'Rental booking created successfully.',
+      id: insertResult.insertedId.toString(),
+      booking: { ...newBooking, _id: insertResult.insertedId.toString() },
+    });
+  } catch (err) {
+    console.error('Failed to create rental booking:', err);
+    return res.status(500).json({ message: 'Failed to create rental booking.' });
+  }
+});
+
+
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
