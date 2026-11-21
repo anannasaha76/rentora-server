@@ -634,6 +634,106 @@ app.post('/api/rentals', async (req, res) => {
     return res.status(500).json({ message: 'Failed to create rental booking.' });
   }
 });
+/* =========================================================================
+   USER PROFILE ROUTES
+   ========================================================================= */
+
+
+// Get user profile by email or user ID
+app.get('/api/users/profile/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'User email is required.' });
+    }
+
+
+    const query = {
+      $or: [
+        { email: email },
+        { email: email.toLowerCase() },
+      ],
+    };
+
+
+    // If param is a valid ObjectId, check _id as well
+    if (ObjectId.isValid(email)) {
+      query.$or.push({ _id: new ObjectId(email) });
+    }
+
+
+    const user = await database.collection('user').findOne(query);
+    if (!user) {
+      return res.status(404).json({ message: 'User profile not found.' });
+    }
+
+
+    const { password, ...safeUser } = user;
+    return res.status(200).json(safeUser);
+  } catch (err) {
+    console.error('Failed to fetch user profile:', err);
+    return res.status(500).json({ message: 'Failed to fetch user profile.' });
+  }
+});
+
+
+// Update user profile by email
+app.put('/api/users/profile/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'User email is required.' });
+    }
+
+
+    const body = req.body || {};
+    const updates = {};
+
+
+    if (body.name !== undefined) updates.name = String(body.name).trim();
+    if (body.image !== undefined) updates.image = String(body.image).trim();
+    if (body.phoneNumber !== undefined) updates.phoneNumber = String(body.phoneNumber).trim();
+    if (body.address !== undefined) updates.address = String(body.address).trim();
+
+
+    updates.updatedAt = new Date();
+
+
+    const query = {
+      $or: [
+        { email: email },
+        { email: email.toLowerCase() },
+      ],
+    };
+
+
+    if (ObjectId.isValid(email)) {
+      query.$or.push({ _id: new ObjectId(email) });
+    }
+
+
+    const result = await database.collection('user').findOneAndUpdate(
+      query,
+      { $set: updates },
+      { returnDocument: 'after' }
+    );
+
+
+    if (!result) {
+      return res.status(404).json({ message: 'User profile not found.' });
+    }
+
+
+    const { password, ...safeUser } = result;
+    return res.status(200).json({
+      message: 'Profile updated successfully.',
+      user: safeUser,
+    });
+  } catch (err) {
+    console.error('Failed to update user profile:', err);
+    return res.status(500).json({ message: 'Failed to update user profile.' });
+  }
+});
 
 
 app.listen(port, () => {
