@@ -193,8 +193,87 @@ app.get('/api/equipment/:id', async (req, res) => {
     return res.status(500).json({ message: 'Failed to fetch equipment.' });
 }
 });
+// Update equipment by ID
+app.put('/api/equipment/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid equipment ID format.' });
+    }
 
 
+    const body = req.body || {};
+    const updates = {};
+
+
+    if (body.equipmentName !== undefined) updates.equipmentName = String(body.equipmentName).trim();
+    if (body.description !== undefined) updates.description = String(body.description).trim();
+    if (body.category !== undefined) updates.category = String(body.category).trim();
+    if (body.location !== undefined) updates.location = String(body.location).trim();
+
+
+    if (body.rentalPrice !== undefined) {
+      const rentalPrice = Number(body.rentalPrice);
+      if (!Number.isFinite(rentalPrice) || rentalPrice <= 0) {
+        return res.status(400).json({ message: 'Rental price must be greater than zero.' });
+      }
+      updates.rentalPrice = rentalPrice;
+    }
+
+
+    if (body.rentalType !== undefined) {
+      if (!rentalTypes.includes(body.rentalType)) {
+        return res.status(400).json({ message: 'Invalid rental type.' });
+      }
+      updates.rentalType = body.rentalType;
+    }
+
+
+    if (body.availableQuantity !== undefined) {
+      const qty = Number(body.availableQuantity);
+      if (!Number.isInteger(qty) || qty < 0) {
+        return res.status(400).json({ message: 'Available quantity must be a non-negative integer.' });
+      }
+      updates.availableQuantity = qty;
+    }
+
+
+    if (body.equipmentCondition !== undefined) updates.equipmentCondition = String(body.equipmentCondition).trim();
+    if (body.brand !== undefined) updates.brand = String(body.brand).trim();
+    if (body.model !== undefined) updates.model = String(body.model).trim();
+    if (body.image !== undefined) updates.image = String(body.image).trim();
+    if (body.rentalTerms !== undefined) updates.rentalTerms = String(body.rentalTerms).trim();
+
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid fields provided for update.' });
+    }
+
+
+    updates.updatedAt = new Date();
+
+
+    const result = await database.collection('equipment').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updates },
+      { returnDocument: 'after' }
+    );
+
+
+    if (!result) {
+      return res.status(404).json({ message: 'Equipment not found.' });
+    }
+
+
+    return res.status(200).json({
+      message: 'Equipment updated successfully.',
+      equipment: result,
+    });
+  } catch (err) {
+    console.error('Failed to update equipment:', err);
+    return res.status(500).json({ message: 'Failed to update equipment.' });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
