@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -116,6 +116,62 @@ app.post('/api/equipment', async (req, res) => {
     return res.status(500).json({ message: 'Failed to add equipment.' });
   }
 });
+
+// Get all equipment added by a specific owner (by route param)
+app.get('/api/equipment/owner/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ message: 'Owner email is required.' });
+    }
+
+    const items = await database
+      .collection('equipment')
+      .find({
+        $or: [
+          { ownerEmail: email },
+          { ownerId: email },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json(items);
+  } catch (err) {
+    console.error('Failed to fetch owner equipment:', err);
+    return res.status(500).json({ message: 'Failed to fetch equipment.' });
+  }
+});
+
+// Get all equipment added by a specific owner (by query params)
+app.get('/api/equipment/owner', async (req, res) => {
+  try {
+    const email = req.query.email ? String(req.query.email) : null;
+    const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
+
+    if (!email && !ownerId) {
+      return res.status(400).json({ message: 'Owner email or ownerId query parameter is required.' });
+    }
+
+    const conditions = [];
+    if (email) conditions.push({ ownerEmail: email });
+    if (ownerId) conditions.push({ ownerId: ownerId });
+
+    const query = conditions.length > 1 ? { $or: conditions } : conditions[0];
+
+    const items = await database
+      .collection('equipment')
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json(items);
+  } catch (err) {
+    console.error('Failed to fetch owner equipment:', err);
+    return res.status(500).json({ message: 'Failed to fetch equipment.' });
+  }
+});
+
 
 
 
