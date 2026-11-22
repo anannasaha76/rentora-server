@@ -2382,3 +2382,4 @@ app.get('/api/analytics/owner', verifyToken, verifyOwner, verifySelf, async (req
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
+export default app;
