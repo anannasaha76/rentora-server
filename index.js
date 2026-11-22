@@ -227,6 +227,25 @@ app.get('/api/equipment', async (req, res) => {
   }
 });
 
+// Featured equipment: 6 approved equipment items using MongoDB aggregation $limit
+app.get('/api/equipment/featured', async (req, res) => {
+  try {
+    const featured = await database
+      .collection('equipment')
+      .aggregate([
+        { $match: { status: 'Approved' } },
+        { $sort: { createdAt: -1 } },
+        { $limit: 6 },
+      ])
+      .toArray();
+
+    return res.status(200).json(featured);
+  } catch (err) {
+    console.error('Failed to fetch featured equipment:', err);
+    return res.status(500).json({ message: 'Failed to fetch featured equipment.' });
+  }
+});
+
 // Get all equipment added by a specific owner (by route param)
 app.get('/api/equipment/owner/:email', async (req, res) => {
   try {
