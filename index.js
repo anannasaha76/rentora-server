@@ -10,22 +10,229 @@ const port = process.env.PORT || 5000;
 //middleware
 app.use(express.json());
 app.use(cors());
+const authOrigin = (
+  process.env.CLIENT_URL ||
+  process.env.BETTER_AUTH_URL ||
+  process.env.NEXT_PUBLIC_BETTER_AUTH_URL ||
+  'http://localhost:3000'
+).replace(/\/+$/, '');
+
+const JWKS = createRemoteJWKSet(new URL(`${authOrigin}/api/auth/jwks`));
+
+const unauthorized = (res, error = 'Unauthorized: Sign-in required.') =>
+  res.status(401).json({ success: false, error });
+
+const forbidden = (
+  res,
+  error = 'Forbidden: You do not have permission to perform this action.'
+) => res.status(403).json({ success: false, error });
+
 const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+  const [scheme, token] = String(req.headers.authorization || '').split(' ');
+  if (scheme?.toLowerCase() !== 'bearer' || !token) {
+    return unauthorized(res);
   }
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
-  }
-  const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
+
   try {
     const { payload } = await jwtVerify(token, JWKS);
     req.user = payload;
-    next();
+    return next();
+  } catch {
+    return unauthorized(res, 'Unauthorized: Invalid or expired token.');
+  }
+};
+
+const getRole = (req) =>
+  String(req.user?.role || req.user?.user?.role || 'customer').toLowerCase();
+
+const getUserId = (req) => req.user?.id || req.user?.sub;
+
+const getUserEmail = (req) => String(req.user?.email || '').toLowerCase();
+
+const verifyRole = (...roles) => (req, res, next) => {
+  const role = getRole(req);
+  if (roles.includes(role) || role === 'admin') return next();
+  return forbidden(res, `Forbidden: ${roles.join(' or ')} access required.`);
+};
+
+const verifyRenter = verifyRole('customer', 'renter');
+const verifyOwner = verifyRole('owner');
+const verifyAdmin = verifyRole('admin');
+
+const verifySelf = (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const identities = [
+    req.params?.email,
+    req.query?.email,
+    req.query?.customerId,
+    req.query?.ownerId,
+    req.body?.customerEmail,
+    req.body?.userEmail,
+    req.body?.customerId,
+    req.body?.userId,
+  ]
+    .filter((value) => value !== undefined && value !== null && value !== '')
+    .map((value) => String(value));
+
+  const userId = getUserId(req) == null ? null : String(getUserId(req));
+  const email = getUserEmail(req);
+  const isOwnIdentity = (value) =>
+    value === userId || value.toLowerCase() === email;
+
+  if (!identities.every(isOwnIdentity)) {
+    return forbidden(res, 'Forbidden: You can only access your own data.');
+  }
+  return next();
+};
+
+const verifyEquipmentOwnership = async (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid equipment id.' });
+  }
+
+  try {
+    const equipment = await database.collection('equipment').findOne({
+      _id: new ObjectId(id),
+    });
+    if (!equipment) {
+      return res.status(404).json({ success: false, error: 'Equipment not found.' });
+    }
+
+    const userId = getUserId(req) == null ? null : String(getUserId(req));
+    const owned =
+      (equipment.ownerId != null && userId != null && String(equipment.ownerId) === userId) ||
+      (equipment.ownerEmail != null &&
+        String(equipment.ownerEmail).toLowerCase() === getUserEmail(req));
+
+    if (!owned) return forbidden(res);
+    return next();
   } catch (error) {
-    return res.status(401).json({ success: false, error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+const verifyRentalAccess = async (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid rental id.' });
+  }
+
+  try {
+    const rental = await database.collection('bookings').findOne({
+      _id: new ObjectId(id),
+    });
+    if (!rental) {
+      return res.status(404).json({ success: false, error: 'Rental not found.' });
+    }
+
+    const userId = getUserId(req) == null ? null : String(getUserId(req));
+    const email = getUserEmail(req);
+    const isCustomer =
+      (rental.customerId != null && userId != null && String(rental.customerId) === userId) ||
+      String(rental.customerEmail || '').toLowerCase() === email;
+    const isOwner =
+      (rental.ownerId != null && userId != null && String(rental.ownerId) === userId) ||
+      String(rental.ownerEmail || '').toLowerCase() === email;
+
+    if (!isCustomer && !isOwner) {
+      return forbidden(res, 'Forbidden: This rental does not belong to you.');
+    }
+
+    req.rental = rental;
+    return next();
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+const verifyBookingOwnership = async (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const bookingId = req.body?.bookingId;
+  if (!bookingId) {
+    return res.status(400).json({ success: false, error: 'bookingId is required.' });
+  }
+  if (!ObjectId.isValid(bookingId)) {
+    return res.status(400).json({ success: false, error: 'Invalid booking id.' });
+  }
+
+  try {
+    const booking = await database.collection('bookings').findOne({
+      _id: new ObjectId(bookingId),
+    });
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found.' });
+    }
+
+    const userId = getUserId(req) == null ? null : String(getUserId(req));
+    const isOwner =
+      (booking.customerId != null && userId != null && String(booking.customerId) === userId) ||
+      String(booking.customerEmail || '').toLowerCase() === getUserEmail(req);
+
+    if (!isOwner) {
+      return forbidden(res, 'Forbidden: This booking does not belong to you.');
+    }
+    return next();
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+const verifyPaymentAccess = async (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const id = req.params.id;
+  const query = ObjectId.isValid(id)
+    ? { $or: [{ _id: new ObjectId(id) }, { bookingId: id }, { transactionId: id }] }
+    : { $or: [{ bookingId: id }, { transactionId: id }] };
+
+  try {
+    const payment = await database.collection('payments').findOne(query);
+    if (!payment) {
+      return res.status(404).json({ success: false, error: 'Payment not found.' });
+    }
+    if (String(payment.customerEmail || '').toLowerCase() !== getUserEmail(req)) {
+      return forbidden(res, 'Forbidden: This payment does not belong to you.');
+    }
+    return next();
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+const verifyFavoriteOwnership = async (req, res, next) => {
+  if (getRole(req) === 'admin') return next();
+
+  const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid favorite id.' });
+  }
+
+  try {
+    const favorite = await database.collection('favorites').findOne({
+      _id: new ObjectId(id),
+    });
+    if (!favorite) {
+      return res.status(404).json({ success: false, error: 'Favorite not found.' });
+    }
+
+    const userId = getUserId(req) == null ? null : String(getUserId(req));
+    const owned =
+      (favorite.userId != null && userId != null && String(favorite.userId) === userId) ||
+      String(favorite.userEmail || '').toLowerCase() === getUserEmail(req);
+
+    if (!owned) {
+      return forbidden(res, 'Forbidden: This favorite does not belong to you.');
+    }
+    return next();
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
   }
 };
 
@@ -52,7 +259,7 @@ function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
 }
 
-app.post('/api/equipment', async (req, res) => {
+app.post('/api/equipment', verifyToken, verifyOwner, async (req, res) => {
   const body = req.body || {};
   const requiredFields = {
     ownerId: body.ownerId,
@@ -398,7 +605,7 @@ app.get('/api/equipment/categories', async (req, res) => {
 });
 
 // Get all equipment added by a specific owner (by route param)
-app.get('/api/equipment/owner/:email', async (req, res) => {
+app.get('/api/equipment/owner/:email', verifyToken, verifyOwner, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -424,7 +631,7 @@ app.get('/api/equipment/owner/:email', async (req, res) => {
 });
 
 // Get all equipment added by a specific owner (by query params)
-app.get('/api/equipment/owner', async (req, res) => {
+app.get('/api/equipment/owner', verifyToken, verifyOwner, verifySelf, async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
@@ -453,7 +660,7 @@ app.get('/api/equipment/owner', async (req, res) => {
 });
 
 // Get single equipment by ID
-app.get('/api/equipment/:id', async (req, res) => {
+app.get('/api/equipment/:id', verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -474,7 +681,7 @@ app.get('/api/equipment/:id', async (req, res) => {
 }
 });
 // Update equipment by ID
-app.put('/api/equipment/:id', async (req, res) => {
+app.put('/api/equipment/:id', verifyToken, verifyOwner, verifyEquipmentOwnership, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -563,7 +770,7 @@ app.put('/api/equipment/:id', async (req, res) => {
 });
 
 // Update equipment status (Approve / Reject / Pending) - Admin action
-app.patch('/api/equipment/:id/status', async (req, res) => {
+app.patch('/api/equipment/:id/status', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body || {};
@@ -599,7 +806,7 @@ app.patch('/api/equipment/:id/status', async (req, res) => {
   }
 });
 // Delete equipment by ID
-app.delete('/api/equipment/:id', async (req, res) => {
+app.delete('/api/equipment/:id', verifyToken, verifyOwner, verifyEquipmentOwnership, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -664,7 +871,7 @@ async function getCustomerBookings(customerEmail, customerId) {
 }
 
 // Get all rentals for a specific customer by email parameter
-app.get('/api/rentals/customer/:email', async (req, res) => {
+app.get('/api/rentals/customer/:email', verifyToken, verifyRenter, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -680,7 +887,7 @@ app.get('/api/rentals/customer/:email', async (req, res) => {
 });
 
 // Get all rentals for customer (query params: email, customerId)
-app.get('/api/rentals/customer', async (req, res) => {
+app.get('/api/rentals/customer', verifyToken, verifyRenter, verifySelf, async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const customerId = req.query.customerId ? String(req.query.customerId) : null;
@@ -698,7 +905,7 @@ app.get('/api/rentals/customer', async (req, res) => {
 });
 
 // Get all rentals for a specific owner by email parameter
-app.get('/api/rentals/owner/:email', async (req, res) => {
+app.get('/api/rentals/owner/:email', verifyToken, verifyOwner, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -714,7 +921,7 @@ app.get('/api/rentals/owner/:email', async (req, res) => {
 });
 
 // Get all rentals for owner (query params: email, ownerId)
-app.get('/api/rentals/owner', async (req, res) => {
+app.get('/api/rentals/owner', verifyToken, verifyOwner, verifySelf, async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
@@ -732,7 +939,7 @@ app.get('/api/rentals/owner', async (req, res) => {
 });
 
 // Get all rentals (Admin platform-wide view with filters and stats)
-app.get('/api/rentals', async (req, res) => {
+app.get('/api/rentals', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { search, bookingStatus, paymentStatus } = req.query;
     const query = {};
@@ -812,7 +1019,7 @@ app.get('/api/rentals', async (req, res) => {
 });
 
 // Get single rental booking by ID (used for checkout / payment page)
-app.get('/api/rentals/:id', async (req, res) => {
+app.get('/api/rentals/:id', verifyToken, verifyRentalAccess, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -832,7 +1039,7 @@ app.get('/api/rentals/:id', async (req, res) => {
 });
 
 // Update rental booking status (e.g. Pending -> Confirmed -> In Progress -> Completed -> Cancelled)
-app.patch('/api/rentals/:id/status', async (req, res) => {
+app.patch('/api/rentals/:id/status', verifyToken, verifyRentalAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { bookingStatus, paymentStatus } = req.body || {};
@@ -867,7 +1074,7 @@ app.patch('/api/rentals/:id/status', async (req, res) => {
 });
 
 // Update full rental booking details (Admin management)
-app.patch('/api/rentals/:id', async (req, res) => {
+app.patch('/api/rentals/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -926,7 +1133,7 @@ app.patch('/api/rentals/:id', async (req, res) => {
 });
 
 // Delete a rental booking (Admin management)
-app.delete('/api/rentals/:id', async (req, res) => {
+app.delete('/api/rentals/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -946,7 +1153,7 @@ app.delete('/api/rentals/:id', async (req, res) => {
 });
 
 // Create a new rental booking (used by checkout / booking modal)
-app.post('/api/rentals', async (req, res) => {
+app.post('/api/rentals', verifyToken, verifyRenter, verifySelf, async (req, res) => {
   try {
     const body = req.body || {};
 
@@ -1052,7 +1259,7 @@ app.post('/api/rentals', async (req, res) => {
 });
 
 // POST /api/bookings — Section 7 of Stripe Payment Guide (Save to MongoDB after Stripe payment)
-app.post('/api/bookings', async (req, res) => {
+app.post('/api/bookings', verifyToken, verifyRenter, verifySelf, async (req, res) => {
   try {
     const body = req.body || {};
     const {
@@ -1165,7 +1372,7 @@ app.post('/api/bookings', async (req, res) => {
    ========================================================================= */
 
 // Process a payment for a booking
-app.post('/api/payments', async (req, res) => {
+app.post('/api/payments', verifyToken, verifyRenter, verifyBookingOwnership, async (req, res) => {
   try {
     const body = req.body || {};
     const { bookingId, paymentMethod = 'Stripe' } = body;
@@ -1252,7 +1459,7 @@ app.post('/api/payments', async (req, res) => {
 });
 
 // Get payment receipt / details by transactionId or bookingId
-app.get('/api/payments/:id', async (req, res) => {
+app.get('/api/payments/:id', verifyToken, verifyPaymentAccess, async (req, res) => {
   try {
     const { id } = req.params;
     let query;
@@ -1278,7 +1485,7 @@ app.get('/api/payments/:id', async (req, res) => {
    ========================================================================= */
 
 // Get all registered users (Admin Oversight)
-app.get('/api/users', async (req, res) => {
+app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { search, role } = req.query;
     const query = {};
@@ -1346,7 +1553,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 // Update user role (Customer, Owner, Admin) — Admin Action
-app.patch('/api/users/:id/role', async (req, res) => {
+app.patch('/api/users/:id/role', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body || {};
@@ -1401,7 +1608,7 @@ app.patch('/api/users/:id/role', async (req, res) => {
 });
 
 // Manage user details (Update name, phone, address, status, role) — Admin Action
-app.patch('/api/users/:id', async (req, res) => {
+app.patch('/api/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body || {};
@@ -1462,7 +1669,7 @@ app.patch('/api/users/:id', async (req, res) => {
 });
 
 // Delete user — Admin Action
-app.delete('/api/users/:id', async (req, res) => {
+app.delete('/api/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     let filter;
@@ -1493,7 +1700,7 @@ app.delete('/api/users/:id', async (req, res) => {
 
 
 // Get user profile by email or user ID
-app.get('/api/users/profile/:email', async (req, res) => {
+app.get('/api/users/profile/:email', verifyToken, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -1531,7 +1738,7 @@ app.get('/api/users/profile/:email', async (req, res) => {
 
 
 // Update user profile by email
-app.put('/api/users/profile/:email', async (req, res) => {
+app.put('/api/users/profile/:email', verifyToken, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -1593,7 +1800,7 @@ app.put('/api/users/profile/:email', async (req, res) => {
 
 
 // Get all favorites for a customer by email (with live equipment data)
-app.get('/api/favorites/:email', async (req, res) => {
+app.get('/api/favorites/:email', verifyToken, verifySelf, async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -1679,7 +1886,7 @@ app.get('/api/favorites/:email', async (req, res) => {
 
 
 // Check if specific equipment is in customer's favorites
-app.get('/api/favorites/check/:email/:equipmentId', async (req, res) => {
+app.get('/api/favorites/check/:email/:equipmentId', verifyToken, verifySelf, async (req, res) => {
   try {
     const { email, equipmentId } = req.params;
     if (!email || !equipmentId) {
@@ -1709,7 +1916,7 @@ app.get('/api/favorites/check/:email/:equipmentId', async (req, res) => {
 
 
 // Add equipment to favorites
-app.post('/api/favorites', async (req, res) => {
+app.post('/api/favorites', verifyToken, verifySelf, async (req, res) => {
   try {
     const {
       userEmail,
@@ -1788,7 +1995,7 @@ app.post('/api/favorites', async (req, res) => {
 
 
 // Remove favorite by favorite ID
-app.delete('/api/favorites/:id', async (req, res) => {
+app.delete('/api/favorites/:id', verifyToken, verifyFavoriteOwnership, async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -1814,7 +2021,7 @@ app.delete('/api/favorites/:id', async (req, res) => {
 
 
 // Remove favorite by email & equipmentId
-app.delete('/api/favorites/item/:email/:equipmentId', async (req, res) => {
+app.delete('/api/favorites/item/:email/:equipmentId', verifyToken, verifySelf, async (req, res) => {
   try {
     const { email, equipmentId } = req.params;
     if (!email || !equipmentId) {
@@ -1865,7 +2072,7 @@ function getLastMonths(n = 6) {
 }
 
 // 1. Admin Analytics (Platform-wide performance)
-app.get('/api/analytics/admin', async (req, res) => {
+app.get('/api/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
   try {
     // 1. Users
     let users = await database
@@ -2002,7 +2209,7 @@ app.get('/api/analytics/admin', async (req, res) => {
 });
 
 // 2. Owner Analytics (Individual Rental Business Performance)
-app.get('/api/analytics/owner', async (req, res) => {
+app.get('/api/analytics/owner', verifyToken, verifyOwner, verifySelf, async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email).trim() : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId).trim() : null;
