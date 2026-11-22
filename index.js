@@ -142,15 +142,15 @@ app.get('/api/equipment', async (req, res) => {
     const andConditions = [];
 
     // Filter by Approval Status:
-    // By default, show Approved equipment for public listing.
-    // If no items have been marked Approved in database yet, include Pending so examiners can evaluate.
-    if (status && status !== 'all') {
+    // Only if status === 'all' (Admin Dashboard) do we show all statuses.
+    // For all public queries, strictly enforce status === 'Approved'.
+    if (status === 'all') {
+      // Admin dashboard requesting all statuses: do not restrict
+    } else if (status) {
       query.status = status;
-    } else if (!status) {
-      const approvedCount = await database.collection('equipment').countDocuments({ status: 'Approved' });
-      if (approvedCount > 0) {
-        query.status = 'Approved';
-      }
+    } else {
+      // Public marketplace: strictly Approved equipment only
+      query.status = 'Approved';
     }
 
     // Challenge 1: Server-side Search by Title or Category (also matches brand/model)
@@ -945,8 +945,222 @@ app.get('/api/payments/:id', async (req, res) => {
   }
 });
 /* =========================================================================
-   USER PROFILE ROUTES
+   USER PROFILE & ADMIN USER MANAGEMENT ROUTES
    ========================================================================= */
+
+// Get all registered users (Admin Oversight)
+app.get('/api/users', async (req, res) => {
+  try {
+    const { search, role } = req.query;
+    const query = {};
+
+    // Filter by role if specified
+    if (role && role !== 'all') {
+      query.role = { $regex: new RegExp(`^${String(role).trim()}$`, 'i') };
+    }
+
+    // Filter by search query (name, email, phoneNumber)
+    if (search && String(search).trim() !== '') {
+      const s = String(search).trim();
+      query.$or = [
+        { name: { $regex: s, $options: 'i' } },
+        { email: { $regex: s, $options: 'i' } },
+        { phoneNumber: { $regex: s, $options: 'i' } },
+      ];
+    }
+
+    // Try 'user' collection first (BetterAuth default)
+    let users = await database
+      .collection('user')
+      .find(query, { projection: { password: 0 } })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // If empty, also check 'users' collection as fallback
+    if (!users || users.length === 0) {
+      const fallback = await database
+        .collection('users')
+        .find(query, { projection: { password: 0 } })
+        .sort({ createdAt: -1 })
+        .toArray();
+      if (fallback && fallback.length > 0) {
+        users = fallback;
+      }
+    }
+
+    // Calculate role metrics
+    let customerCount = 0;
+    let ownerCount = 0;
+    let adminCount = 0;
+
+    users.forEach((u) => {
+      const r = (u.role || 'customer').toLowerCase();
+      if (r === 'admin') adminCount++;
+      else if (r === 'owner') ownerCount++;
+      else customerCount++;
+    });
+
+    return res.status(200).json({
+      users,
+      total: users.length,
+      counts: {
+        total: users.length,
+        customer: customerCount,
+        owner: ownerCount,
+        admin: adminCount,
+      },
+    });
+  } catch (err) {
+    console.error('Failed to fetch users:', err);
+    return res.status(500).json({ message: 'Failed to fetch registered users.' });
+  }
+});
+
+// Update user role (Customer, Owner, Admin) — Admin Action
+app.patch('/api/users/:id/role', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body || {};
+
+    if (!role) {
+      return res.status(400).json({ message: 'Role is required.' });
+    }
+
+    const normalizedRole = String(role).trim().toLowerCase();
+    const validRoles = ['customer', 'owner', 'admin'];
+    if (!validRoles.includes(normalizedRole)) {
+      return res.status(400).json({
+        message: `Invalid role. Must be one of: ${validRoles.join(', ')}`,
+      });
+    }
+
+    let filter;
+    if (ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+    } else {
+      filter = { $or: [{ email: id }, { email: id.toLowerCase() }, { id: id }] };
+    }
+
+    // Try 'user' collection first
+    let result = await database.collection('user').findOneAndUpdate(
+      filter,
+      { $set: { role: normalizedRole, updatedAt: new Date() } },
+      { returnDocument: 'after', projection: { password: 0 } }
+    );
+
+    // Fallback to 'users' collection
+    if (!result) {
+      result = await database.collection('users').findOneAndUpdate(
+        filter,
+        { $set: { role: normalizedRole, updatedAt: new Date() } },
+        { returnDocument: 'after', projection: { password: 0 } }
+      );
+    }
+
+    if (!result) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    return res.status(200).json({
+      message: `User role updated to ${normalizedRole}.`,
+      user: result,
+    });
+  } catch (err) {
+    console.error('Failed to update user role:', err);
+    return res.status(500).json({ message: 'Failed to update user role.' });
+  }
+});
+
+// Manage user details (Update name, phone, address, status, role) — Admin Action
+app.patch('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const updates = {};
+
+    if (body.name !== undefined) updates.name = String(body.name).trim();
+    if (body.phoneNumber !== undefined) updates.phoneNumber = String(body.phoneNumber).trim();
+    if (body.address !== undefined) updates.address = String(body.address).trim();
+    if (body.image !== undefined) updates.image = String(body.image).trim();
+    if (body.status !== undefined) updates.status = String(body.status).trim();
+
+    if (body.role !== undefined) {
+      const normalizedRole = String(body.role).trim().toLowerCase();
+      if (['customer', 'owner', 'admin'].includes(normalizedRole)) {
+        updates.role = normalizedRole;
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid update fields provided.' });
+    }
+
+    updates.updatedAt = new Date();
+
+    let filter;
+    if (ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+    } else {
+      filter = { $or: [{ email: id }, { email: id.toLowerCase() }, { id: id }] };
+    }
+
+    let result = await database.collection('user').findOneAndUpdate(
+      filter,
+      { $set: updates },
+      { returnDocument: 'after', projection: { password: 0 } }
+    );
+
+    if (!result) {
+      result = await database.collection('users').findOneAndUpdate(
+        filter,
+        { $set: updates },
+        { returnDocument: 'after', projection: { password: 0 } }
+      );
+    }
+
+    if (!result) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'User updated successfully.',
+      user: result,
+    });
+  } catch (err) {
+    console.error('Failed to update user:', err);
+    return res.status(500).json({ message: 'Failed to update user.' });
+  }
+});
+
+// Delete user — Admin Action
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let filter;
+    if (ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+    } else {
+      filter = { $or: [{ email: id }, { email: id.toLowerCase() }, { id: id }] };
+    }
+
+    let result = await database.collection('user').deleteOne(filter);
+    if (result.deletedCount === 0) {
+      result = await database.collection('users').deleteOne(filter);
+    }
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'User deleted successfully.',
+      id,
+    });
+  } catch (err) {
+    console.error('Failed to delete user:', err);
+    return res.status(500).json({ message: 'Failed to delete user.' });
+  }
+});
 
 
 // Get user profile by email or user ID
