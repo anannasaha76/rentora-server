@@ -1,72 +1,33 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
-import jwt from 'jsonwebtoken';
 import { MongoClient, ObjectId } from 'mongodb';
+import { jwtVerify, createRemoteJWKSet } from 'jose'
 
 const app = express();
 const port = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'RentoraSecretKey2026';
 
 //middleware
 app.use(express.json());
 app.use(cors());
-
-// JWT Verification Middleware
-export function verifyToken(req, res, next) {
-  const authHeader = req.headers.authorization || req.headers.Authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'Unauthorized: Access token is missing or invalid.' });
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
   }
-
-  const token = authHeader.split(' ')[1];
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Sign-in required." });
+  }
+  const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    const { payload } = await jwtVerify(token, JWKS);
+    req.user = payload;
     next();
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ message: 'Unauthorized: Token has expired.' });
-    }
-    return res.status(403).json({ message: 'Forbidden: Invalid token.' });
+  } catch (error) {
+    return res.status(401).json({ success: false, error: error.message });
   }
-}
-
-// Role-Based Middleware: verifyRenter (Customer/Renter role, or Admin)
-export function verifyRenter(req, res, next) {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Unauthorized: Authentication required.' });
-  }
-  const role = String(req.user.role || '').toLowerCase();
-  if (role === 'renter' || role === 'customer' || role === 'admin') {
-    return next();
-  }
-  return res.status(403).json({ message: 'Forbidden: Renter access required.' });
-}
-
-// Role-Based Middleware: verifyOwner (Equipment Owner role, or Admin)
-export function verifyOwner(req, res, next) {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Unauthorized: Authentication required.' });
-  }
-  const role = String(req.user.role || '').toLowerCase();
-  if (role === 'owner' || role === 'equipment owner' || role === 'admin') {
-    return next();
-  }
-  return res.status(403).json({ message: 'Forbidden: Equipment Owner access required.' });
-}
-
-// Role-Based Middleware: verifyAdmin (Admin role only)
-export function verifyAdmin(req, res, next) {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Unauthorized: Authentication required.' });
-  }
-  const role = String(req.user.role || '').toLowerCase();
-  if (role === 'admin') {
-    return next();
-  }
-  return res.status(403).json({ message: 'Forbidden: Admin access required.' });
-}
+};
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-4ksem3f-shard-00-00.ohhbrll.mongodb.net:27017,ac-4ksem3f-shard-00-01.ohhbrll.mongodb.net:27017,ac-4ksem3f-shard-00-02.ohhbrll.mongodb.net:27017/?ssl=true&replicaSet=atlas-mwgrqy-shard-0&authSource=admin`);
 
@@ -91,8 +52,7 @@ function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === '';
 }
 
-// Add new equipment (Owner only)
-app.post('/api/equipment', verifyToken, verifyOwner, async (req, res) => {
+app.post('/api/equipment', async (req, res) => {
   const body = req.body || {};
   const requiredFields = {
     ownerId: body.ownerId,
@@ -438,7 +398,7 @@ app.get('/api/equipment/categories', async (req, res) => {
 });
 
 // Get all equipment added by a specific owner (by route param)
-app.get('/api/equipment/owner/:email', verifyToken, verifyOwner, async (req, res) => {
+app.get('/api/equipment/owner/:email', async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -464,7 +424,7 @@ app.get('/api/equipment/owner/:email', verifyToken, verifyOwner, async (req, res
 });
 
 // Get all equipment added by a specific owner (by query params)
-app.get('/api/equipment/owner', verifyToken, verifyOwner, async (req, res) => {
+app.get('/api/equipment/owner', async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
@@ -513,8 +473,8 @@ app.get('/api/equipment/:id', async (req, res) => {
     return res.status(500).json({ message: 'Failed to fetch equipment.' });
 }
 });
-// Update equipment by ID (Owner or Admin)
-app.put('/api/equipment/:id', verifyToken, verifyOwner, async (req, res) => {
+// Update equipment by ID
+app.put('/api/equipment/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -603,7 +563,7 @@ app.put('/api/equipment/:id', verifyToken, verifyOwner, async (req, res) => {
 });
 
 // Update equipment status (Approve / Reject / Pending) - Admin action
-app.patch('/api/equipment/:id/status', verifyToken, verifyAdmin, async (req, res) => {
+app.patch('/api/equipment/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body || {};
@@ -638,8 +598,8 @@ app.patch('/api/equipment/:id/status', verifyToken, verifyAdmin, async (req, res
     return res.status(500).json({ message: 'Failed to update equipment status.' });
   }
 });
-// Delete equipment by ID (Owner or Admin)
-app.delete('/api/equipment/:id', verifyToken, verifyOwner, async (req, res) => {
+// Delete equipment by ID
+app.delete('/api/equipment/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -703,8 +663,8 @@ async function getCustomerBookings(customerEmail, customerId) {
     .toArray();
 }
 
-// Get all rentals for a specific customer by email parameter (Renter or Admin)
-app.get('/api/rentals/customer/:email', verifyToken, verifyRenter, async (req, res) => {
+// Get all rentals for a specific customer by email parameter
+app.get('/api/rentals/customer/:email', async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -720,7 +680,7 @@ app.get('/api/rentals/customer/:email', verifyToken, verifyRenter, async (req, r
 });
 
 // Get all rentals for customer (query params: email, customerId)
-app.get('/api/rentals/customer', verifyToken, verifyRenter, async (req, res) => {
+app.get('/api/rentals/customer', async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const customerId = req.query.customerId ? String(req.query.customerId) : null;
@@ -737,8 +697,8 @@ app.get('/api/rentals/customer', verifyToken, verifyRenter, async (req, res) => 
   }
 });
 
-// Get all rentals for a specific owner by email parameter (Owner or Admin)
-app.get('/api/rentals/owner/:email', verifyToken, verifyOwner, async (req, res) => {
+// Get all rentals for a specific owner by email parameter
+app.get('/api/rentals/owner/:email', async (req, res) => {
   try {
     const { email } = req.params;
     if (!email) {
@@ -754,7 +714,7 @@ app.get('/api/rentals/owner/:email', verifyToken, verifyOwner, async (req, res) 
 });
 
 // Get all rentals for owner (query params: email, ownerId)
-app.get('/api/rentals/owner', verifyToken, verifyOwner, async (req, res) => {
+app.get('/api/rentals/owner', async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email) : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId) : null;
@@ -772,7 +732,7 @@ app.get('/api/rentals/owner', verifyToken, verifyOwner, async (req, res) => {
 });
 
 // Get all rentals (Admin platform-wide view with filters and stats)
-app.get('/api/rentals', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/rentals', async (req, res) => {
   try {
     const { search, bookingStatus, paymentStatus } = req.query;
     const query = {};
@@ -907,7 +867,7 @@ app.patch('/api/rentals/:id/status', async (req, res) => {
 });
 
 // Update full rental booking details (Admin management)
-app.patch('/api/rentals/:id', verifyToken, verifyAdmin, async (req, res) => {
+app.patch('/api/rentals/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -966,7 +926,7 @@ app.patch('/api/rentals/:id', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // Delete a rental booking (Admin management)
-app.delete('/api/rentals/:id', verifyToken, verifyAdmin, async (req, res) => {
+app.delete('/api/rentals/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
@@ -1318,7 +1278,7 @@ app.get('/api/payments/:id', async (req, res) => {
    ========================================================================= */
 
 // Get all registered users (Admin Oversight)
-app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/users', async (req, res) => {
   try {
     const { search, role } = req.query;
     const query = {};
@@ -1386,7 +1346,7 @@ app.get('/api/users', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // Update user role (Customer, Owner, Admin) — Admin Action
-app.patch('/api/users/:id/role', verifyToken, verifyAdmin, async (req, res) => {
+app.patch('/api/users/:id/role', async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body || {};
@@ -1441,7 +1401,7 @@ app.patch('/api/users/:id/role', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // Manage user details (Update name, phone, address, status, role) — Admin Action
-app.patch('/api/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+app.patch('/api/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body || {};
@@ -1502,7 +1462,7 @@ app.patch('/api/users/:id', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // Delete user — Admin Action
-app.delete('/api/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+app.delete('/api/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
     let filter;
@@ -1905,7 +1865,7 @@ function getLastMonths(n = 6) {
 }
 
 // 1. Admin Analytics (Platform-wide performance)
-app.get('/api/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/analytics/admin', async (req, res) => {
   try {
     // 1. Users
     let users = await database
@@ -2042,7 +2002,7 @@ app.get('/api/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // 2. Owner Analytics (Individual Rental Business Performance)
-app.get('/api/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
+app.get('/api/analytics/owner', async (req, res) => {
   try {
     const email = req.query.email ? String(req.query.email).trim() : null;
     const ownerId = req.query.ownerId ? String(req.query.ownerId).trim() : null;
@@ -2211,86 +2171,6 @@ app.get('/api/analytics/owner', verifyToken, verifyOwner, async (req, res) => {
   }
 });
 
-
-/* =========================================================================
-   JWT AUTHENTICATION ROUTES
-   ========================================================================= */
-
-// Generate JWT Access Token upon successful login
-app.post('/api/auth/jwt', async (req, res) => {
-  try {
-    const { email, id, role, name } = req.body || {};
-
-    if (!email) {
-      return res.status(400).json({ message: 'Email is required to generate access token.' });
-    }
-
-    // Attempt to lookup fresh user details from database if id or role is missing
-    let userRole = role || 'customer';
-    let userId = id || '';
-    let userName = name || '';
-
-    try {
-      const userDoc = await database.collection('user').findOne({
-        $or: [
-          { email: email },
-          { email: email.toLowerCase() },
-        ],
-      });
-
-      if (userDoc) {
-        userId = userId || (userDoc._id ? userDoc._id.toString() : userDoc.id);
-        userRole = userDoc.role || userRole;
-        userName = userName || userDoc.name || '';
-      }
-    } catch (dbErr) {
-      console.warn('Could not query user collection during JWT generation:', dbErr);
-    }
-
-    const payload = {
-      id: String(userId),
-      email: String(email).toLowerCase(),
-      name: String(userName),
-      role: String(userRole),
-    };
-
-    // Sign access token with 7-day expiration
-    const token = jwt.sign(payload, JWT_SECRET, {
-      expiresIn: '7d',
-    });
-
-    // Set secure HTTP-only cookie as well for server session tracking
-    res.cookie('rentora_access_token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-
-    return res.status(200).json({
-      message: 'Access token generated successfully.',
-      token,
-      user: payload,
-    });
-  } catch (err) {
-    console.error('Failed to generate JWT:', err);
-    return res.status(500).json({ message: 'Internal server error generating token.' });
-  }
-});
-
-// Verify JWT and retrieve current authenticated user session
-app.get('/api/auth/verify', verifyToken, (req, res) => {
-  return res.status(200).json({
-    valid: true,
-    user: req.user,
-  });
-});
-
-// Clear JWT token on logout
-app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('rentora_access_token');
-  return res.status(200).json({ message: 'Logged out successfully.' });
-});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
