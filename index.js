@@ -561,6 +561,86 @@ app.get('/api/rentals/owner', async (req, res) => {
   }
 });
 
+// Get all rentals (Admin platform-wide view with filters and stats)
+app.get('/api/rentals', async (req, res) => {
+  try {
+    const { search, bookingStatus, paymentStatus } = req.query;
+    const query = {};
+
+    if (bookingStatus && bookingStatus !== 'all') {
+      query.bookingStatus = bookingStatus;
+    }
+
+    if (paymentStatus && paymentStatus !== 'all') {
+      query.paymentStatus = paymentStatus;
+    }
+
+    if (search && String(search).trim()) {
+      const s = String(search).trim();
+      const regex = { $regex: s, $options: 'i' };
+      query.$or = [
+        { customerName: regex },
+        { customerEmail: regex },
+        { customerPhone: regex },
+        { ownerName: regex },
+        { ownerEmail: regex },
+        { equipmentName: regex },
+        { equipmentCategory: regex },
+        { deliveryAddress: regex },
+        { transactionId: regex },
+      ];
+    }
+
+    const bookingsCollection = database.collection('bookings');
+    const rentals = await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray();
+
+    // Compute platform-wide stats across all bookings
+    const allBookings = await bookingsCollection.find({}).toArray();
+    let totalRevenue = 0;
+    let pendingCount = 0;
+    let confirmedCount = 0;
+    let inProgressCount = 0;
+    let completedCount = 0;
+    let cancelledCount = 0;
+    let paidCount = 0;
+    let unpaidCount = 0;
+
+    for (const b of allBookings) {
+      if (b.paymentStatus === 'Paid') {
+        totalRevenue += Number(b.totalAmount || b.amount || 0);
+        paidCount++;
+      } else {
+        unpaidCount++;
+      }
+
+      const bs = (b.bookingStatus || '').toLowerCase();
+      if (bs === 'confirmed') confirmedCount++;
+      else if (bs === 'in progress') inProgressCount++;
+      else if (bs === 'completed') completedCount++;
+      else if (bs === 'cancelled') cancelledCount++;
+      else pendingCount++;
+    }
+
+    return res.status(200).json({
+      rentals,
+      stats: {
+        totalRentals: allBookings.length,
+        totalRevenue,
+        pendingCount,
+        confirmedCount,
+        inProgressCount,
+        completedCount,
+        cancelledCount,
+        paidCount,
+        unpaidCount,
+      },
+    });
+  } catch (err) {
+    console.error('Failed to fetch all rentals for admin:', err);
+    return res.status(500).json({ message: 'Failed to fetch rentals.' });
+  }
+});
+
 // Get single rental booking by ID (used for checkout / payment page)
 app.get('/api/rentals/:id', async (req, res) => {
   try {
@@ -613,6 +693,85 @@ app.patch('/api/rentals/:id/status', async (req, res) => {
   } catch (err) {
     console.error('Failed to update rental status:', err);
     return res.status(500).json({ message: 'Failed to update rental status.' });
+  }
+});
+
+// Update full rental booking details (Admin management)
+app.patch('/api/rentals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid rental booking ID.' });
+    }
+
+    const body = req.body || {};
+    const updates = {};
+
+    const allowedFields = [
+      'customerName',
+      'customerEmail',
+      'customerPhone',
+      'deliveryAddress',
+      'additionalNotes',
+      'equipmentName',
+      'equipmentCategory',
+      'ownerName',
+      'ownerEmail',
+      'startDate',
+      'endDate',
+      'durationDays',
+      'requiredQuantity',
+      'rentalPrice',
+      'totalAmount',
+      'paymentStatus',
+      'bookingStatus',
+    ];
+
+    allowedFields.forEach((field) => {
+      if (body[field] !== undefined) {
+        updates[field] = body[field];
+      }
+    });
+
+    updates.updatedAt = new Date();
+
+    const result = await database.collection('bookings').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updates },
+      { returnDocument: 'after' }
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: 'Rental booking not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Rental booking updated successfully.',
+      rental: result,
+    });
+  } catch (err) {
+    console.error('Failed to update rental booking:', err);
+    return res.status(500).json({ message: 'Failed to update rental booking.' });
+  }
+});
+
+// Delete a rental booking (Admin management)
+app.delete('/api/rentals/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid rental booking ID.' });
+    }
+
+    const result = await database.collection('bookings').deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Rental booking not found.' });
+    }
+
+    return res.status(200).json({ message: 'Rental booking deleted successfully.' });
+  } catch (err) {
+    console.error('Failed to delete rental booking:', err);
+    return res.status(500).json({ message: 'Failed to delete rental booking.' });
   }
 });
 
@@ -1458,6 +1617,331 @@ app.delete('/api/favorites/item/:email/:equipmentId', async (req, res) => {
   } catch (err) {
     console.error('Failed to remove favorite:', err);
     return res.status(500).json({ message: 'Failed to remove favorite.' });
+  }
+});
+
+/* =========================================================================
+   DASHBOARD ANALYTICS ROUTES (ADMIN & OWNER)
+   ========================================================================= */
+
+// Helper to generate the last N months structure
+function getLastMonths(n = 6) {
+  const months = [];
+  const now = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const shortMonth = d.toLocaleDateString('en-US', { month: 'short' });
+    months.push({ key, label, shortMonth, bookings: 0, revenue: 0, earnings: 0, completed: 0 });
+  }
+  return months;
+}
+
+// 1. Admin Analytics (Platform-wide performance)
+app.get('/api/analytics/admin', async (req, res) => {
+  try {
+    // 1. Users
+    let users = await database
+      .collection('user')
+      .find({}, { projection: { password: 0 } })
+      .toArray();
+
+    if (!users || users.length === 0) {
+      users = await database
+        .collection('users')
+        .find({}, { projection: { password: 0 } })
+        .toArray();
+    }
+
+    const totalUsers = users.length;
+    let customerCount = 0;
+    let ownerCount = 0;
+    let adminCount = 0;
+
+    users.forEach((u) => {
+      const r = (u.role || 'customer').toLowerCase();
+      if (r === 'admin') adminCount++;
+      else if (r === 'owner') ownerCount++;
+      else customerCount++;
+    });
+
+    // 2. Equipment
+    const allEquipment = await database.collection('equipment').find({}).toArray();
+    const totalEquipment = allEquipment.length;
+    let pendingApprovals = 0;
+    let approvedEquipment = 0;
+    let rejectedEquipment = 0;
+
+    allEquipment.forEach((eq) => {
+      const s = (eq.status || 'Pending').toLowerCase();
+      if (s === 'approved') approvedEquipment++;
+      else if (s === 'rejected') rejectedEquipment++;
+      else pendingApprovals++;
+    });
+
+    // 3. Bookings & Payments
+    const allBookings = await database
+      .collection('bookings')
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const totalBookings = allBookings.length;
+    let completedRentals = 0;
+    let confirmedRentals = 0;
+    let inProgressRentals = 0;
+    let pendingRentals = 0;
+    let cancelledRentals = 0;
+    let totalRevenue = 0;
+    let paidBookingsCount = 0;
+    let unpaidBookingsCount = 0;
+
+    const monthlyStats = getLastMonths(6);
+    const monthMap = new Map(monthlyStats.map((m) => [m.key, m]));
+
+    allBookings.forEach((b) => {
+      const bStatus = (b.bookingStatus || '').toLowerCase();
+      if (bStatus === 'completed') completedRentals++;
+      else if (bStatus === 'confirmed') confirmedRentals++;
+      else if (bStatus === 'in progress') inProgressRentals++;
+      else if (bStatus === 'cancelled') cancelledRentals++;
+      else pendingRentals++;
+
+      const isPaid = (b.paymentStatus || '').toLowerCase() === 'paid';
+      const amount = Number(b.totalAmount || b.amount || 0);
+
+      if (isPaid) {
+        totalRevenue += amount;
+        paidBookingsCount++;
+      } else {
+        unpaidBookingsCount++;
+      }
+
+      // Aggregate into monthly stats
+      const d = b.createdAt ? new Date(b.createdAt) : (b.startDate ? new Date(b.startDate) : null);
+      if (d && !isNaN(d.getTime())) {
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const monthEntry = monthMap.get(key);
+        if (monthEntry) {
+          monthEntry.bookings += 1;
+          if (isPaid) {
+            monthEntry.revenue += amount;
+          }
+          if (bStatus === 'completed') {
+            monthEntry.completed += 1;
+          }
+        }
+      }
+    });
+
+    return res.status(200).json({
+      summary: {
+        totalUsers,
+        totalEquipment,
+        totalBookings,
+        pendingApprovals,
+        completedRentals,
+        totalRevenue,
+      },
+      usersBreakdown: {
+        totalUsers,
+        customerCount,
+        ownerCount,
+        adminCount,
+      },
+      equipmentBreakdown: {
+        totalEquipment,
+        approvedEquipment,
+        pendingApprovals,
+        rejectedEquipment,
+      },
+      bookingsBreakdown: {
+        totalBookings,
+        completedRentals,
+        confirmedRentals,
+        inProgressRentals,
+        pendingRentals,
+        cancelledRentals,
+        paidBookingsCount,
+        unpaidBookingsCount,
+      },
+      monthlyBookingStats: monthlyStats,
+      recentBookings: allBookings.slice(0, 5),
+    });
+  } catch (err) {
+    console.error('Failed to compute admin analytics:', err);
+    return res.status(500).json({ message: 'Failed to compute admin analytics.' });
+  }
+});
+
+// 2. Owner Analytics (Individual Rental Business Performance)
+app.get('/api/analytics/owner', async (req, res) => {
+  try {
+    const email = req.query.email ? String(req.query.email).trim() : null;
+    const ownerId = req.query.ownerId ? String(req.query.ownerId).trim() : null;
+
+    if (!email && !ownerId) {
+      return res.status(400).json({ message: 'Owner email or ownerId query parameter is required.' });
+    }
+
+    // 1. Owner's Equipment
+    const equipConditions = [];
+    if (email) {
+      equipConditions.push(
+        { ownerEmail: email },
+        { ownerEmail: email.toLowerCase() },
+        { userEmail: email },
+        { userEmail: email.toLowerCase() }
+      );
+    }
+    if (ownerId) {
+      equipConditions.push({ ownerId: ownerId }, { userId: ownerId });
+    }
+
+    const equipQuery = equipConditions.length > 0 ? { $or: equipConditions } : {};
+    const ownerEquipment = await database.collection('equipment').find(equipQuery).toArray();
+
+    const totalListedEquipment = ownerEquipment.length;
+    let approvedEquipment = 0;
+    let pendingApprovals = 0;
+    let rejectedEquipment = 0;
+    const ownerEquipmentIds = new Set();
+
+    ownerEquipment.forEach((eq) => {
+      const idStr = eq._id ? eq._id.toString() : '';
+      if (idStr) ownerEquipmentIds.add(idStr);
+
+      const s = (eq.status || 'Pending').toLowerCase();
+      if (s === 'approved') approvedEquipment++;
+      else if (s === 'rejected') rejectedEquipment++;
+      else pendingApprovals++;
+    });
+
+    // 2. Owner's Bookings
+    const bookingConditions = [];
+    if (email) {
+      bookingConditions.push(
+        { ownerEmail: email },
+        { ownerEmail: email.toLowerCase() }
+      );
+    }
+    if (ownerId) {
+      bookingConditions.push({ ownerId: ownerId });
+    }
+    if (ownerEquipmentIds.size > 0) {
+      bookingConditions.push({ equipmentId: { $in: Array.from(ownerEquipmentIds) } });
+    }
+
+    const bookingQuery = bookingConditions.length > 0 ? { $or: bookingConditions } : {};
+    const ownerBookings = await database
+      .collection('bookings')
+      .find(bookingQuery)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const totalBookings = ownerBookings.length;
+    let completedRentals = 0;
+    let activeRentals = 0; // Confirmed or In Progress
+    let pendingRentals = 0;
+    let cancelledRentals = 0;
+    let totalEarnings = 0;
+    let pendingEarnings = 0;
+
+    const monthlyStats = getLastMonths(6);
+    const monthMap = new Map(monthlyStats.map((m) => [m.key, m]));
+
+    // Map equipment earnings performance
+    const equipPerformanceMap = new Map();
+    ownerEquipment.forEach((eq) => {
+      const id = eq._id.toString();
+      equipPerformanceMap.set(id, {
+        equipmentId: id,
+        equipmentName: eq.equipmentName,
+        category: eq.category,
+        image: eq.image,
+        rentalPrice: eq.rentalPrice,
+        rentalType: eq.rentalType,
+        totalBookings: 0,
+        totalEarnings: 0,
+      });
+    });
+
+    ownerBookings.forEach((b) => {
+      const bStatus = (b.bookingStatus || '').toLowerCase();
+      if (bStatus === 'completed') completedRentals++;
+      else if (bStatus === 'confirmed' || bStatus === 'in progress') activeRentals++;
+      else if (bStatus === 'cancelled') cancelledRentals++;
+      else pendingRentals++;
+
+      const isPaid = (b.paymentStatus || '').toLowerCase() === 'paid';
+      const amount = Number(b.totalAmount || b.amount || 0);
+
+      if (isPaid) {
+        totalEarnings += amount;
+      } else {
+        pendingEarnings += amount;
+      }
+
+      // Track equipment stats
+      if (b.equipmentId && equipPerformanceMap.has(String(b.equipmentId))) {
+        const item = equipPerformanceMap.get(String(b.equipmentId));
+        item.totalBookings += 1;
+        if (isPaid) {
+          item.totalEarnings += amount;
+        }
+      }
+
+      // Aggregate into monthly stats
+      const d = b.createdAt ? new Date(b.createdAt) : (b.startDate ? new Date(b.startDate) : null);
+      if (d && !isNaN(d.getTime())) {
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const monthEntry = monthMap.get(key);
+        if (monthEntry) {
+          monthEntry.bookings += 1;
+          if (isPaid) {
+            monthEntry.earnings += amount;
+            monthEntry.revenue += amount;
+          }
+          if (bStatus === 'completed') {
+            monthEntry.completed += 1;
+          }
+        }
+      }
+    });
+
+    const equipmentPerformance = Array.from(equipPerformanceMap.values())
+      .sort((a, b) => b.totalEarnings - a.totalEarnings);
+
+    return res.status(200).json({
+      summary: {
+        totalListedEquipment,
+        completedRentals,
+        totalEarnings,
+        activeRentals,
+        totalBookings,
+        pendingEarnings,
+      },
+      equipmentBreakdown: {
+        totalListedEquipment,
+        approvedEquipment,
+        pendingApprovals,
+        rejectedEquipment,
+      },
+      bookingsBreakdown: {
+        totalBookings,
+        completedRentals,
+        activeRentals,
+        pendingRentals,
+        cancelledRentals,
+      },
+      monthlyEarnings: monthlyStats,
+      equipmentPerformance,
+      recentRentals: ownerBookings.slice(0, 5),
+    });
+  } catch (err) {
+    console.error('Failed to compute owner analytics:', err);
+    return res.status(500).json({ message: 'Failed to compute owner analytics.' });
   }
 });
 
