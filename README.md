@@ -6,6 +6,19 @@ Rentora is an equipment rental marketplace that connects customers with verified
 ## Live URL
 https://rentora-client-orcin.vercel.app
 
+## Technology Stack
+
+- **Framework:** Next.js (App Router)
+- **Language:** TypeScript
+- **Styling & UI:** Tailwind CSS, shadcn/ui, Base UI
+- **Animations:** Framer Motion
+- **Authentication & Authorization:** Better Auth with JWT plugin, Google OAuth, and role-based access control
+- **Database:** MongoDB with the Better Auth MongoDB adapter
+- **Payments:** Stripe and Stripe.js
+- **Icons & Feedback:** lucide-react, react-toastify
+- **Theming:** next-themes
+- **Deployment:** Vercel
+
 ## Key Features
 
 - Home page with animated categories, featured equipment, reviews, and how-it-works sections.
