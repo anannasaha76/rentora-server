@@ -504,7 +504,7 @@ app.get('/api/equipment/categories', async (req, res) => {
     // Standard fallback categories metadata to enrich dynamically found categories
     const metadataMap = {
       'Construction Equipment': {
-        description: 'Excavators, concrete mixers, scaffoldings & compactors',
+        description: 'Construction machinery, concrete mixers, scaffoldings & compactors',
         gradient: 'from-amber-500/20 to-amber-500/5 text-amber-600 dark:text-amber-400',
         border: 'border-amber-500/20',
       },
@@ -529,24 +529,24 @@ app.get('/api/equipment/categories', async (req, res) => {
         border: 'border-purple-500/20',
       },
       'Event Equipment': {
-        description: 'Stage setups, truss systems, industrial generators & lights',
+        description: 'Stage setups, truss systems, lighting & sound systems',
         gradient: 'from-rose-500/20 to-rose-500/5 text-rose-600 dark:text-rose-400',
         border: 'border-rose-500/20',
       },
-      'Excavators': {
-        description: 'Mini, crawler, and wheeled hydraulic excavators',
-        gradient: 'from-orange-500/20 to-orange-500/5 text-orange-600 dark:text-orange-400',
-        border: 'border-orange-500/20',
-      },
-      'Power Tools': {
-        description: 'Industrial drills, cutters, grinders, and demolition tools',
+      'Clean Equipment': {
+        description: 'Industrial cleaners, pressure washers, sweepers & vacuums',
         gradient: 'from-teal-500/20 to-teal-500/5 text-teal-600 dark:text-teal-400',
         border: 'border-teal-500/20',
       },
-      'Generators': {
-        description: 'Silent and open-frame diesel & petrol generators',
+      'Power Equipment': {
+        description: 'Generators, drills, cutters, grinders & demolition tools',
         gradient: 'from-yellow-500/20 to-yellow-500/5 text-yellow-600 dark:text-yellow-400',
         border: 'border-yellow-500/20',
+      },
+      'Other': {
+        description: 'Other professional equipment and machinery ready for rental',
+        gradient: 'from-slate-500/20 to-slate-500/5 text-slate-600 dark:text-slate-400',
+        border: 'border-slate-500/20',
       },
     };
 
@@ -577,6 +577,9 @@ app.get('/api/equipment/categories', async (req, res) => {
       'Agriculture Equipment',
       'Electronics',
       'Event Equipment',
+      'Clean Equipment',
+      'Power Equipment',
+      'Other',
     ];
 
     for (const std of standardCategories) {
